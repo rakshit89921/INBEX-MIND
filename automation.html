@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="INBEX AI SaaS Dashboard - Automation" />
+    <title>Automation - INBEX</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap"
+        rel="stylesheet" />
+    <link rel="stylesheet" href="dashboard.css" />
+    <script src="auth.js"></script>
+</head>
+
+<body>
+    <nav class="top-nav" aria-label="Main Navigation">
+        <div class="nav-left">
+            <a href="dashboard.html" class="logo-wrap" aria-label="INBEX home">
+                <div class="logo-icon" aria-hidden="true">
+                    <svg width="24" height="24" viewBox="0 0 30 30" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <rect width="30" height="30" rx="9" fill="url(#logoGradD)" />
+                        <path d="M8 8L15 15L8 22" stroke="white" stroke-width="2.4" stroke-linecap="round"
+                            stroke-linejoin="round" />
+                        <path d="M22 8L15 15L22 22" stroke="white" stroke-width="2.4" stroke-linecap="round"
+                            stroke-linejoin="round" />
+                        <defs>
+                            <linearGradient id="logoGradD" x1="0" y1="0" x2="30" y2="30" gradientUnits="userSpaceOnUse">
+                                <stop stop-color="#6366f1" />
+                                <stop offset="1" stop-color="#a855f7" />
+                            </linearGradient>
+                        </defs>
+                    </svg>
+                </div>
+                <span class="logo-text">INBEX</span>
+            </a>
+            <div class="nav-links">
+                <a href="dashboard.html" class="nav-link">Dashboard</a>
+                <a href="classify.html" class="nav-link">Classify</a>
+                <a href="automation.html" class="nav-link active">Automation</a>
+                <a href="reports.html" class="nav-link">Reports</a>
+                <a href="settings.html" class="nav-link">Settings</a>
+            </div>
+        </div>
+        <div class="nav-right">
+            <button id="theme-toggle" class="icon-btn" aria-label="Toggle theme">
+                <svg class="icon-sun" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                    stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="5"></circle>
+                    <line x1="12" y1="1" x2="12" y2="3"></line>
+                    <line x1="12" y1="21" x2="12" y2="23"></line>
+                    <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+                    <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+                    <line x1="1" y1="12" x2="3" y2="12"></line>
+                    <line x1="21" y1="12" x2="23" y2="12"></line>
+                    <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+                    <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+                </svg>
+                <svg class="icon-moon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                    stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+                </svg>
+            </button>
+            <div class="user-profile">
+                <img id="user-avatar" src="https://ui-avatars.com/api/?name=User&background=6366f1&color=fff&rounded=true"
+                    alt="User" class="avatar" />
+            </div>
+        </div>
+    </nav>
+
+    <main class="dashboard-container layout-reveal">
+        <header class="welcome-section"
+            style="flex-direction: row; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: var(--sp-4);">
+            <div>
+                <h1 class="welcome-title">Automation Center</h1>
+                <p class="welcome-subtitle">Each user can set a daily email, choose the send time, and review all saved automations here.</p>
+            </div>
+            <button id="open-automation-form-btn" class="btn btn-primary">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                    stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="12" y1="5" x2="12" y2="19"></line>
+                    <line x1="5" y1="12" x2="19" y2="12"></line>
+                </svg>
+                Add Automation
+            </button>
+        </header>
+
+        <div class="main-grid">
+            <div style="display:flex;flex-direction:column;gap:var(--sp-6);">
+                <section class="panel">
+                    <header class="panel-header">
+                        <div>
+                            <h2 class="panel-title">Your Daily Email Automations</h2>
+                            <p class="welcome-subtitle" style="margin-top:8px;">Only the logged-in user's automations are shown below.</p>
+                        </div>
+                        <span id="gmail-status-pill" class="badge badge-muted">Checking Gmail...</span>
+                    </header>
+                    <div class="table-container">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Name</th>
+                                    <th>Recipient</th>
+                                    <th>Every Day At</th>
+                                    <th>Next Run</th>
+                                    <th>Status</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="automation-table-body">
+                                <tr>
+                                    <td colspan="6" style="text-align:center;color:var(--text-muted);padding:28px;">Loading automations...</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+
+                <section class="panel">
+                    <header class="panel-header">
+                        <h2 class="panel-title">Automation Details</h2>
+                    </header>
+                    <div id="automation-cards" class="workflow-grid">
+                        <article class="workflow-card">
+                            <div class="workflow-details">
+                                <p style="color:var(--text-muted);">Create an automation to see the email content, recent run status, and schedule details here.</p>
+                            </div>
+                        </article>
+                    </div>
+                </section>
+            </div>
+
+            <section class="panel" style="align-self:start;">
+                <header class="panel-header" style="flex-direction: column; align-items: flex-start; gap: var(--sp-3);">
+                    <div style="display:flex; justify-content:space-between; width:100%; align-items:center;">
+                        <h2 class="panel-title" id="automation-form-title">Create Daily Email</h2>
+                        <span class="badge badge-ai" id="automation-type-badge">Daily</span>
+                    </div>
+                    <div class="filter-tabs" style="width: 100%; border-bottom: 1px solid var(--border-color); padding-bottom: 0;">
+                        <button class="tab active" id="tab-recurring" style="flex: 1;">Daily Recurring</button>
+                        <button class="tab" id="tab-bulk" style="flex: 1;">Bulk Broadcast</button>
+                    </div>
+                </header>
+                <div class="assistant-content">
+                    <form id="automation-form" style="display:flex;flex-direction:column;gap:var(--sp-4);">
+                        <input type="hidden" id="automation-id" />
+                        <input type="hidden" id="automation-timezone" />
+
+                        <div>
+                            <label class="section-label" for="automation-name">Automation Name</label>
+                            <input id="automation-name" class="input-field" type="text" placeholder="Daily follow-up" required />
+                        </div>
+
+                        <div>
+                            <div style="display:flex; justify-content:space-between; align-items:center;">
+                                <label class="section-label" for="automation-recipient">Recipient Emails</label>
+                                <button type="button" class="btn btn-ghost small" onclick="document.getElementById('csv-upload').click()" style="font-size:0.7rem; padding:2px 8px; color:var(--clr-accent-1); display:flex; align-items:center; gap:4px;">
+                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"></path></svg>
+                                    Import CSV
+                                </button>
+                                <input type="file" id="csv-upload" style="display:none;" accept=".csv" onchange="handleCsvUpload(event)" />
+                            </div>
+                            <input id="automation-recipient" class="input-field" type="text" placeholder="email1@example.com, email2@example.com" required />
+                            <p style="font-size: 0.75rem; color: var(--text-muted); margin-top: 4px;">Separate multiple emails with commas or upload a CSV.</p>
+                        </div>
+
+                        <div>
+                            <label class="section-label" for="automation-subject">Subject</label>
+                            <input id="automation-subject" class="input-field" type="text" placeholder="Daily update" required />
+                        </div>
+
+                        <div>
+                            <label class="section-label" for="automation-body">Email Content</label>
+                            <textarea id="automation-body" class="input-field" rows="8"
+                                placeholder="Write the email content that should go every day." required
+                                style="resize:vertical;min-height:180px;padding-top:14px;"></textarea>
+                        </div>
+
+                        <div id="recurring-only-fields">
+                            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:var(--sp-4);">
+                                <div>
+                                    <label class="section-label" for="automation-time">Send Time</label>
+                                    <input id="automation-time" class="input-field" type="time" required />
+                                </div>
+                                <div>
+                                    <label class="section-label" for="automation-timezone-display">Timezone</label>
+                                    <input id="automation-timezone-display" class="input-field" type="text" readonly />
+                                </div>
+                            </div>
+
+                            <label style="display:flex;align-items:center;gap:12px;color:var(--text-secondary);font-size:var(--text-sm);margin-top:var(--sp-4);">
+                                <input id="automation-active" type="checkbox" checked />
+                                Active immediately
+                            </label>
+                        </div>
+
+                        <div class="draft-actions" style="display:flex;gap:var(--sp-3);flex-wrap:wrap;">
+                            <button id="automation-submit-btn" type="submit" class="btn btn-primary" style="flex:1;">Save Automation</button>
+                            <button id="automation-reset-btn" type="button" class="btn btn-outline" style="flex:1;">Clear</button>
+                        </div>
+                    </form>
+
+                    <div class="draft-preview" style="margin-top:var(--sp-5);">
+                        <label class="section-label">What This Does</label>
+                        <div class="draft-box">
+                            <p>The user chooses the email address, the content, and the daily send time.</p>
+                            <p>INBEX sends that email every day using the connected Gmail account for that user.</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </div>
+    </main>
+
+    <div id="auto-toast"
+        style="position:fixed;bottom:24px;right:24px;background:var(--bg-surface);border:1px solid var(--border-highlight);border-radius:var(--r-md);padding:12px 20px;font-size:var(--text-sm);color:var(--text-primary);box-shadow:var(--shadow-soft);z-index:9999;transform:translateY(20px);opacity:0;pointer-events:none;transition:all 0.25s ease;border-left:3px solid var(--clr-success);"
+        role="alert" aria-live="polite"></div>
+
+    <script src="automation.js"></script>
+</body>
+
+</html>

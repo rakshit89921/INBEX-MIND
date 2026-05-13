@@ -1,0 +1,1239 @@
+/**
+ * INBEX — Dashboard Script
+ * Handles: Theme toggling, Gmail integration, real email loading, stats
+ */
+'use strict';
+
+const API_BASE = '';
+
+document.addEventListener('DOMContentLoaded', () => {
+    if (window.Auth) window.Auth.requireAuth();
+
+    // --- Theme System ---
+    const themeToggleBtn = document.getElementById('theme-toggle');
+    const htmlElement = document.documentElement;
+    const savedTheme = localStorage.getItem('inbex-theme') || 'dark';
+    htmlElement.setAttribute('data-theme', savedTheme);
+
+    themeToggleBtn.addEventListener('click', () => {
+        const currentTheme = htmlElement.getAttribute('data-theme');
+        const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+        htmlElement.setAttribute('data-theme', newTheme);
+        localStorage.setItem('inbex-theme', newTheme);
+    });
+
+    // --- Tab Filtering ---
+    const tabs = document.querySelectorAll('.tab');
+    tabs.forEach(tab => {
+        tab.addEventListener('click', () => {
+            tabs.forEach(t => t.classList.remove('active'));
+            tab.classList.add('active');
+            const category = tab.textContent.trim();
+            filterEmails(category);
+        });
+    });
+
+    // --- Load Data ---
+    loadDashboardStats();
+    checkGmailStatus();
+    loadUserProfile();
+    loadAutomationTasks();
+});
+
+// ── Category colors ──
+const CAT_COLORS = {
+    HR: '#c084fc', Work: '#60a5fa', Finance: '#34d399',
+    Personal: '#fbbf24', Spam: '#f87171'
+};
+
+const CAT_BADGES = {
+    HR: 'badge-hr', Work: 'badge-work', Finance: 'badge-finance',
+    Personal: 'badge-personal', Spam: 'badge-spam'
+};
+
+// Store fetched emails for filtering
+let allGmailEmails = [];
+let currentPageToken = null;
+let pageHistory = [null]; // stack of pageTokens for "Prev"
+let currentPageIndex = 0;
+
+const URGENT_KEYWORDS = ['urgent', 'important', 'asap', 'deadline', 'critical', 'action required', 'immediately', 'priority', 'time sensitive'];
+
+function loadInbexPrefs() {
+    const defaults = { autoSend: false, financeApproval: true, urgencyThreshold: '90', emailDigest: true, inappNotif: true };
+    try { return { ...defaults, ...JSON.parse(localStorage.getItem('inbex-prefs')) }; }
+    catch { return { ...defaults }; }
+}
+
+function isUrgentEmail(email) {
+    const text = `${email.subject || ''} ${email.snippet || ''} ${email.body || ''}`.toLowerCase();
+    const hasKeyword = URGENT_KEYWORDS.some(kw => text.includes(kw));
+    if (hasKeyword) return true;
+
+    // Also flag as urgent if confidence exceeds the user's urgency threshold
+    const prefs = loadInbexPrefs();
+    const threshold = parseInt(prefs.urgencyThreshold, 10) / 100;
+    if (email.confidence >= threshold && email.category === 'Work') return true;
+
+    return false;
+}
+
+// ── Dashboard Stats ──
+async function loadDashboardStats() {
+    if (!window.Auth || !window.Auth.isAuthenticated()) {
+        window.location.href = 'index.html';
+        return;
+    }
+
+    try {
+        const response = await fetch(`${API_BASE}/dashboard/stats`, {
+            headers: window.Auth.getHeaders()
+        });
+
+        if (response.status === 401) {
+            window.Auth.clearSession();
+            window.location.href = 'index.html';
+            return;
+        }
+
+        if (response.ok) {
+            const data = await response.json();
+            
+            const userNameEl = document.querySelector('.welcome-title');
+            if (userNameEl && data.user_name) {
+                const firstName = data.user_name.split(' ')[0];
+                userNameEl.textContent = `Welcome back, ${firstName}`;
+            }
+
+            updateStatValue('stat-total', data.total_emails_processed);
+            updateStatValue('stat-urgent', data.urgent_emails);
+            updateStatValue('stat-automated', data.automated_today);
+            updateStatValue('stat-pending', data.pending_decisions);
+        }
+    } catch (error) {
+        console.error('Failed to load dashboard stats:', error);
+    }
+}
+
+function updateStatValue(id, value) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = (value || 0).toLocaleString();
+}
+
+// ── Gmail Integration ──
+async function checkGmailStatus() {
+    if (!window.Auth || !window.Auth.isAuthenticated()) return;
+
+    try {
+        const resp = await fetch(`${API_BASE}/gmail/status`, {
+            headers: window.Auth.getHeaders()
+        });
+
+        if (resp.ok) {
+            const data = await resp.json();
+            const connectBtn = document.getElementById('gmail-connect-btn');
+            const disconnectBtn = document.getElementById('gmail-disconnect-btn');
+            const statusBadge = document.getElementById('gmail-status-badge');
+
+            if (data.connected) {
+                if (connectBtn) connectBtn.style.display = 'none';
+                if (disconnectBtn) {
+                    disconnectBtn.style.display = 'inline-flex';
+                    disconnectBtn.title = `Connected: ${data.email}`;
+                }
+                if (statusBadge) {
+                    statusBadge.textContent = `✅ ${data.email}`;
+                    statusBadge.style.display = 'inline-flex';
+                }
+                loadGmailEmails();
+            } else {
+                if (connectBtn) connectBtn.style.display = 'inline-flex';
+                if (disconnectBtn) disconnectBtn.style.display = 'none';
+                if (statusBadge) statusBadge.style.display = 'none';
+            }
+        }
+    } catch (err) {
+        console.error('Gmail status check failed:', err);
+    }
+}
+
+async function connectGmail() {
+    try {
+        const resp = await fetch(`${API_BASE}/gmail/connect`, {
+            headers: window.Auth.getHeaders()
+        });
+        if (resp.ok) {
+            const data = await resp.json();
+            window.location.href = data.auth_url;
+        }
+    } catch (err) {
+        console.error('Gmail connect error:', err);
+    }
+}
+
+async function disconnectGmail() {
+    try {
+        await fetch(`${API_BASE}/gmail/disconnect`, {
+            method: 'POST',
+            headers: window.Auth.getHeaders()
+        });
+        window.location.reload();
+    } catch (err) {
+        console.error('Gmail disconnect error:', err);
+    }
+}
+
+async function loadGmailEmails(pageToken = null) {
+    const emailList = document.getElementById('email-list');
+    if (!emailList) return;
+
+    // Show loading
+    emailList.innerHTML = `
+        <div class="email-loading" style="text-align:center;padding:40px;color:var(--text-muted);">
+            <div class="loading-spinner" style="width:32px;height:32px;border:3px solid rgba(99,102,241,0.2);border-top-color:#6366f1;border-radius:50%;animation:spin 0.8s linear infinite;margin:0 auto 12px;"></div>
+            <p>Fetching emails from Gmail...</p>
+        </div>`;
+
+    try {
+        let url = `${API_BASE}/gmail/emails?max=25`;
+        if (pageToken) url += `&pageToken=${encodeURIComponent(pageToken)}`;
+
+        const resp = await fetch(url, {
+            headers: window.Auth.getHeaders()
+        });
+
+        if (!resp.ok) {
+            const err = await resp.json();
+            emailList.innerHTML = `<div style="text-align:center;padding:40px;color:var(--text-muted);"><p>${err.detail || 'Failed to load emails'}</p></div>`;
+            return;
+        }
+
+        const data = await resp.json();
+        const emails = data.emails || data; // support both old and new format
+        currentPageToken = data.nextPageToken || null;
+        allGmailEmails = emails;
+
+        // Tag urgent emails
+        allGmailEmails.forEach(e => { e._isUrgent = isUrgentEmail(e); });
+
+        // Update urgent stat with actual count
+        const urgentCount = allGmailEmails.filter(e => e._isUrgent).length;
+        updateStatValue('stat-urgent', urgentCount);
+
+        // Compute and update Briefing Banner stats
+        const total_today = allGmailEmails.length;
+        const ai_actions_today = Math.floor(total_today * 0.8);
+        const automations_today = Math.floor(total_today * 0.3);
+        const time_saved_mins = Math.floor(ai_actions_today * 1.5);
+        
+        if (typeof updateBriefingBanner === 'function') {
+            updateBriefingBanner({
+                total_today,
+                ai_actions_today,
+                automations_today,
+                time_saved_mins
+            });
+        }
+
+        renderEmails(emails);
+        renderPagination();
+    } catch (err) {
+        console.error('Gmail fetch error:', err);
+        emailList.innerHTML = `<div style="text-align:center;padding:40px;color:var(--text-muted);"><p>Failed to connect to server</p></div>`;
+    }
+}
+
+function renderPagination() {
+    // Remove old pagination
+    const old = document.getElementById('email-pagination');
+    if (old) old.remove();
+
+    const panel = document.querySelector('.priority-inbox-panel');
+    if (!panel) return;
+
+    const hasPrev = currentPageIndex > 0;
+    const hasNext = !!currentPageToken;
+    if (!hasPrev && !hasNext) return;
+
+    const pag = document.createElement('div');
+    pag.id = 'email-pagination';
+    pag.style.cssText = 'display:flex;justify-content:center;align-items:center;gap:12px;padding:12px 20px;border-top:1px solid var(--border-color);';
+
+    pag.innerHTML = `
+        <button class="btn btn-outline small" onclick="prevEmailPage()" ${hasPrev ? '' : 'disabled'} style="font-size:0.8rem;padding:6px 16px;${hasPrev ? '' : 'opacity:0.4;cursor:not-allowed;'}">
+            ← Previous
+        </button>
+        <span style="font-size:0.78rem;color:var(--text-muted);">Page ${currentPageIndex + 1}</span>
+        <button class="btn btn-outline small" onclick="nextEmailPage()" ${hasNext ? '' : 'disabled'} style="font-size:0.8rem;padding:6px 16px;${hasNext ? '' : 'opacity:0.4;cursor:not-allowed;'}">
+            Next →
+        </button>
+    `;
+    panel.appendChild(pag);
+}
+
+function nextEmailPage() {
+    if (!currentPageToken) return;
+    currentPageIndex++;
+    if (pageHistory.length <= currentPageIndex) {
+        pageHistory.push(currentPageToken);
+    }
+    loadGmailEmails(currentPageToken);
+}
+
+function prevEmailPage() {
+    if (currentPageIndex <= 0) return;
+    currentPageIndex--;
+    const token = pageHistory[currentPageIndex] || null;
+    loadGmailEmails(token);
+}
+
+function renderEmails(emails) {
+    const emailList = document.getElementById('email-list');
+    if (!emailList) return;
+
+    if (emails.length === 0) {
+        emailList.innerHTML = `<div style="text-align:center;padding:40px;color:var(--text-muted);"><p>No emails found</p></div>`;
+        return;
+    }
+
+    // Also populate AI email selector
+    populateAiSelector(emails);
+
+    emailList.innerHTML = emails.map(email => {
+        const fromStr = email.from || 'Unknown';
+        const senderMatch = fromStr.match(/^(.+?)\s*</) || [, fromStr];
+        const senderName = senderMatch[1].replace(/"/g, '').trim();
+        const dateStr = formatDate(email.date);
+        const catColor = CAT_COLORS[email.category] || '#60a5fa';
+        const confidencePct = Math.round((email.confidence || 0) * 100);
+
+        return `
+            <div class="email-item ${email.isUnread ? 'unread' : ''}" data-category="${email.category}" data-gmail-id="${escapeHtml(String(email.id))}" style="cursor:pointer;">
+                <div class="email-meta">
+                    <span class="sender-name">${escapeHtml(senderName)}</span>
+                    <span class="timestamp">${dateStr}</span>
+                </div>
+                <h4 class="email-subject">${escapeHtml(email.subject || '(No Subject)')}</h4>
+                <p class="email-preview">${escapeHtml(email.snippet || '')}</p>
+                <div class="email-footer">
+                    <span class="badge" style="background:${catColor}20;color:${catColor};border:1px solid ${catColor}33;">${email.category}</span>
+                    <span class="badge badge-ai" style="font-size:0.7rem;">🎯 ${confidencePct}%</span>
+                    ${email.isUnread ? '<span class="badge badge-urgent" style="font-size:0.7rem;">Unread</span>' : ''}
+                    ${email._isUrgent ? '<span class="badge" style="background:rgba(239,68,68,0.12);color:#ef4444;border:1px solid rgba(239,68,68,0.25);font-size:0.7rem;">🔴 Urgent</span>' : ''}
+                    ${email.calendar_event ? `<a href="${email.calendar_event.htmlLink}" target="_blank" class="badge" style="background:rgba(52,211,153,0.12);color:#34d399;border:1px solid rgba(52,211,153,0.25);font-size:0.7rem;text-decoration:none;" title="Added to Calendar" onclick="event.stopPropagation()">📅 Calendar</a>` : ''}
+                </div>
+            </div>`;
+    }).join('');
+}
+
+// Event delegation for email item clicks
+document.addEventListener('click', (e) => {
+    const emailItem = e.target.closest('.email-item[data-gmail-id]');
+    if (!emailItem) return;
+    // Don't open modal if a link/button inside was clicked
+    if (e.target.closest('a') || e.target.closest('button')) return;
+    const gmailId = emailItem.getAttribute('data-gmail-id');
+    if (gmailId) openEmailModal(gmailId);
+});
+
+function filterEmails(category) {
+    // Reset urgent card highlight
+    const urgentCard = document.getElementById('stat-card-urgent');
+    if (urgentCard) urgentCard.style.outline = '';
+
+    if (category === 'All') {
+        renderEmails(allGmailEmails);
+    } else {
+        renderEmails(allGmailEmails.filter(e => e.category === category));
+    }
+}
+
+function filterUrgentEmails() {
+    const urgent = allGmailEmails.filter(e => e._isUrgent);
+    if (urgent.length === 0) {
+        alert('No urgent emails found on this page.');
+        return;
+    }
+    renderEmails(urgent);
+
+    // Highlight the urgent card
+    const urgentCard = document.getElementById('stat-card-urgent');
+    if (urgentCard) urgentCard.style.outline = '2px solid var(--clr-danger)';
+
+    // Reset filter tabs
+    const tabs = document.querySelectorAll('.tab');
+    tabs.forEach(t => t.classList.remove('active'));
+
+    addDecisionLog(`Filtered ${urgent.length} urgent emails`);
+}
+
+function loadUserProfile() {
+    const user = window.Auth ? window.Auth.getUser() : null;
+    if (!user) return;
+
+    const name = user.name || user.username || user.email || 'User';
+    const avatar = document.getElementById('user-avatar');
+    if (avatar) {
+        const encoded = encodeURIComponent(name);
+        avatar.src = `https://ui-avatars.com/api/?name=${encoded}&background=6366f1&color=fff&rounded=true`;
+        avatar.alt = name;
+    }
+
+    const welcomeTitle = document.querySelector('.welcome-title');
+    if (welcomeTitle) {
+        const firstName = name.split(' ')[0];
+        welcomeTitle.textContent = `Welcome back, ${firstName}`;
+    }
+
+    // Populate dropdown
+    const dropName = document.getElementById('dropdown-name');
+    const dropEmail = document.getElementById('dropdown-email');
+    if (dropName) dropName.textContent = name;
+    if (dropEmail) dropEmail.textContent = user.email || '';
+}
+
+function toggleProfileMenu() {
+    const dd = document.getElementById('profile-dropdown');
+    if (!dd) return;
+    dd.style.display = dd.style.display === 'none' ? 'block' : 'none';
+}
+
+function signOutFromDashboard() {
+    if (window.Auth) window.Auth.clearSession();
+    window.location.href = 'index.html';
+}
+
+// Close dropdown when clicking outside
+document.addEventListener('click', (e) => {
+    const dd = document.getElementById('profile-dropdown');
+    const avatar = document.getElementById('user-avatar');
+    if (dd && dd.style.display !== 'none' && !dd.contains(e.target) && e.target !== avatar) {
+        dd.style.display = 'none';
+    }
+});
+
+// ── Email Detail Modal ──
+let currentModalEmail = null;
+
+function openEmailModal(gmailId) {
+    const email = allGmailEmails.find(e => String(e.id) === String(gmailId));
+    if (!email) {
+        console.warn('[Modal] Email not found for id:', gmailId);
+        return;
+    }
+    currentModalEmail = email;
+
+    const catColor = CAT_COLORS[email.category] || '#60a5fa';
+    const fromStr = email.from || 'Unknown';
+    const senderMatch = fromStr.match(/^(.+?)\s*<(.+?)>/) || [, fromStr, ''];
+
+    document.getElementById('modal-subject').textContent = email.subject || '(No Subject)';
+    document.getElementById('modal-from').textContent = senderMatch[1].replace(/"/g, '').trim();
+    document.getElementById('modal-to').textContent = email.to ? ` → ${email.to}` : '';
+    document.getElementById('modal-date').textContent = email.date || '';
+    document.getElementById('modal-body').textContent = email.body || email.snippet || '';
+    document.getElementById('modal-confidence').textContent = `🎯 ${Math.round(email.confidence * 100)}% confidence`;
+
+    const badge = document.getElementById('modal-category-badge');
+    badge.textContent = email.category;
+    badge.style.cssText = `font-size:0.78rem;background:${catColor}20;color:${catColor};border:1px solid ${catColor}33;`;
+
+    document.getElementById('email-modal').style.display = 'flex';
+    document.body.style.overflow = 'hidden';
+
+    // Generate AI Summary (Flashcard)
+    generateAiSummary(email);
+}
+
+async function generateAiSummary(email) {
+    const section = document.getElementById('modal-summary-section');
+    const content = document.getElementById('modal-summary-content');
+    if (!section || !content) return;
+
+    section.style.display = 'block';
+    content.textContent = 'Generating AI Flashcard...';
+
+    try {
+        const resp = await fetch(`${API_BASE}/generate-summary`, {
+            method: 'POST',
+            headers: window.Auth.getHeaders(),
+            body: JSON.stringify({ text: email.body || email.snippet })
+        });
+
+        if (resp.ok) {
+            const data = await resp.json();
+            content.textContent = data.summary;
+        } else {
+            content.textContent = 'Summary unavailable for this email.';
+        }
+    } catch (err) {
+        content.textContent = 'Connection error. Could not summarize.';
+    }
+}
+
+function closeEmailModal() {
+    document.getElementById('email-modal').style.display = 'none';
+    const summarySection = document.getElementById('modal-summary-section');
+    if (summarySection) summarySection.style.display = 'none';
+    document.body.style.overflow = '';
+    currentModalEmail = null;
+}
+
+function replyFromModal() {
+    if (!currentModalEmail) return;
+    // Select this email in the AI assistant selector and generate reply
+    const select = document.getElementById('ai-email-select');
+    select.value = currentModalEmail.id;
+    onEmailSelected();
+    closeEmailModal();
+    // Scroll to AI panel
+    document.querySelector('.ai-assistant-panel').scrollIntoView({ behavior: 'smooth' });
+}
+
+// Close modal on Escape key or backdrop click
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeEmailModal(); });
+document.addEventListener('click', (e) => {
+    if (e.target.id === 'email-modal') closeEmailModal();
+});
+
+// ── AI Assistant — Email Selector + Reply Generation ──
+let selectedAiEmail = null;
+
+function populateAiSelector(emails) {
+    const select = document.getElementById('ai-email-select');
+    if (!select) return;
+    const currentVal = select.value;
+    select.innerHTML = '<option value="">— Select an email to reply —</option>';
+    emails.forEach(email => {
+        const senderMatch = email.from.match(/^(.+?)\s*</) || [, email.from];
+        const senderName = senderMatch[1].replace(/"/g, '').trim();
+        const opt = document.createElement('option');
+        opt.value = email.id;
+        opt.textContent = `${senderName} — ${(email.subject || '(No Subject)').substring(0, 50)}`;
+        select.appendChild(opt);
+    });
+    if (currentVal) select.value = currentVal;
+}
+
+function onEmailSelected() {
+    const select = document.getElementById('ai-email-select');
+    const emailId = select.value;
+
+    if (!emailId) {
+        document.getElementById('ai-draft-section').style.display = 'none';
+        document.getElementById('ai-idle-state').style.display = 'block';
+        selectedAiEmail = null;
+        return;
+    }
+
+    selectedAiEmail = allGmailEmails.find(e => e.id === emailId);
+    if (!selectedAiEmail) return;
+
+    document.getElementById('ai-idle-state').style.display = 'none';
+    document.getElementById('ai-draft-section').style.display = 'block';
+
+    const senderMatch = selectedAiEmail.from.match(/^(.+?)\s*</) || [, selectedAiEmail.from];
+    document.getElementById('ai-reply-label').textContent = `Reply to: ${senderMatch[1].replace(/"/g, '').trim()}`;
+
+    generateAiReply();
+}
+
+async function generateAiReply() {
+    if (!selectedAiEmail) return;
+
+    const textarea = document.getElementById('ai-reply-text');
+    const sourceLabel = document.getElementById('ai-source-label');
+    const confRow = document.getElementById('ai-confidence-row');
+    const sendBtn = document.getElementById('ai-send-btn');
+    const regenBtn = document.getElementById('ai-regen-btn');
+
+    textarea.value = 'Generating AI reply...';
+    textarea.disabled = true;
+    sendBtn.disabled = true;
+    regenBtn.disabled = true;
+    confRow.style.display = 'none';
+
+    addDecisionLog(`Generating reply for "${selectedAiEmail.subject?.substring(0, 30)}..."`);
+
+    try {
+        const resp = await fetch(`${API_BASE}/generate-reply`, {
+            method: 'POST',
+            headers: window.Auth.getHeaders(),
+            body: JSON.stringify({
+                email_text: `Subject: ${selectedAiEmail.subject}\nFrom: ${selectedAiEmail.from}\n\n${selectedAiEmail.body}`,
+                category: selectedAiEmail.category,
+            }),
+        });
+
+        if (resp.ok) {
+            const data = await resp.json();
+            textarea.value = data.reply;
+            sourceLabel.textContent = data.source === 'ai' ? '✨ AI Generated via Groq' : '📋 Template-based reply';
+            confRow.style.display = 'flex';
+            addDecisionLog(`AI draft ready for ${selectedAiEmail.from.match(/^(.+?)\s*</)?.[1] || selectedAiEmail.from}`);
+        } else {
+            textarea.value = 'Failed to generate reply. Try again.';
+        }
+    } catch (err) {
+        textarea.value = 'Error connecting to server. Is the backend running?';
+        console.error('AI reply error:', err);
+    }
+
+    textarea.disabled = false;
+    sendBtn.disabled = false;
+    regenBtn.disabled = false;
+}
+
+async function sendAiReply() {
+    if (!selectedAiEmail) return;
+
+    const textarea = document.getElementById('ai-reply-text');
+    const replyText = textarea.value.trim();
+    if (!replyText) return;
+
+    const sendBtn = document.getElementById('ai-send-btn');
+    sendBtn.disabled = true;
+    sendBtn.textContent = 'Sending...';
+
+    // Extract sender email from "Name <email>" format
+    const emailMatch = selectedAiEmail.from.match(/<(.+?)>/) || [, selectedAiEmail.from];
+    const toEmail = emailMatch[1].trim();
+    const subject = selectedAiEmail.subject?.startsWith('Re:') ? selectedAiEmail.subject : `Re: ${selectedAiEmail.subject || ''}`;
+
+    try {
+        const resp = await fetch(`${API_BASE}/gmail/send`, {
+            method: 'POST',
+            headers: window.Auth.getHeaders(),
+            body: JSON.stringify({
+                to: toEmail,
+                subject: subject,
+                body: replyText,
+                thread_id: selectedAiEmail.threadId || undefined,
+            }),
+        });
+
+        if (resp.ok) {
+            sendBtn.innerHTML = '✅ Sent!';
+            sendBtn.style.background = '#10b981';
+            addDecisionLog(`📨 Reply sent to ${toEmail}`);
+            setTimeout(() => {
+                sendBtn.disabled = false;
+                sendBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg> Send via Gmail`;
+                sendBtn.style.background = '';
+            }, 3000);
+        } else {
+            const err = await resp.json();
+            alert(`Send failed: ${err.detail || 'Unknown error'}`);
+            sendBtn.disabled = false;
+            sendBtn.textContent = 'Send via Gmail';
+        }
+    } catch (err) {
+        alert('Failed to connect to server');
+        sendBtn.disabled = false;
+        sendBtn.textContent = 'Send via Gmail';
+    }
+}
+
+// ── Decision Log ──
+function addDecisionLog(message) {
+    const log = document.getElementById('ai-decision-log');
+    if (!log) return;
+    const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const li = document.createElement('li');
+    li.className = 'log-item';
+    li.innerHTML = `<span class="log-time">${time}</span><span class="log-desc">${escapeHtml(message)}</span>`;
+    log.prepend(li);
+    // Keep max 10 entries
+    while (log.children.length > 10) log.removeChild(log.lastChild);
+}
+
+function openClassifyWithEmail(gmailId) {
+    const email = allGmailEmails.find(e => e.id === gmailId);
+    if (email) {
+        const text = `Subject: ${email.subject}\nFrom: ${email.from}\nTo: ${email.to}\nDate: ${email.date}\n\n${email.body}`;
+        localStorage.setItem('inbex-classify-email', text);
+        localStorage.setItem('inbex-classify-gmail-id', gmailId);
+        localStorage.setItem('inbex-classify-thread-id', email.threadId || '');
+        localStorage.setItem('inbex-classify-from', email.from || '');
+        window.location.href = 'classify.html';
+    }
+}
+
+// ── Helpers ──
+function formatDate(dateStr) {
+    if (!dateStr) return '';
+    try {
+        const d = new Date(dateStr);
+        const now = new Date();
+        const diff = now - d;
+        if (diff < 60000) return 'Just now';
+        if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
+        if (diff < 86400000) return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        if (diff < 172800000) return 'Yesterday';
+        return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+    } catch { return dateStr; }
+}
+
+function escapeHtml(str) {
+    if (!str) return '';
+    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// AI Compose Logic
+function openComposeModal() {
+    document.getElementById('compose-modal').style.display = 'flex';
+    document.body.style.overflow = 'hidden';
+}
+
+function closeComposeModal() {
+    document.getElementById('compose-modal').style.display = 'none';
+    document.body.style.overflow = '';
+}
+
+async function loadActivity() {
+    const feed = document.getElementById('dashboard-activity-feed');
+    if (!feed) return;
+
+    try {
+        const resp = await fetch(`${API_BASE}/activity`, {
+            headers: window.Auth.getHeaders()
+        });
+        if (!resp.ok) throw new Error('Failed to load');
+
+        const activity = await resp.json();
+        if (activity.length === 0) {
+            feed.innerHTML = `<div style="text-align:center;padding:32px;color:var(--text-muted);"><p style="font-size:0.85rem;">No recent activity.</p></div>`;
+            return;
+        }
+
+        feed.innerHTML = activity.map(item => {
+            const isAuto = item.type === 'automation';
+            const iconClass = isAuto ? 'bg-info' : 'bg-success';
+            const iconSvg = isAuto 
+                ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"></path></svg>'
+                : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+            
+            const timeStr = timeAgo(item.created_at);
+            const desc = isAuto 
+                ? `<strong>${escapeHtml(item.detail)}</strong> automation run.`
+                : `Email classified as <strong>${escapeHtml(item.detail)}</strong>.`;
+
+            return `
+                <div class="activity-item">
+                    <div class="activity-icon ${iconClass}">${iconSvg}</div>
+                    <div class="activity-text">${desc}</div>
+                    <span class="activity-time">${timeStr}</span>
+                </div>
+            `;
+        }).join('');
+    } catch (err) {
+        console.error('Activity load error:', err);
+    }
+}
+
+async function loadDashboardStats() {
+    const canvas = document.getElementById('dashCatChart');
+    if (!canvas) return;
+
+    try {
+        const resp = await fetch(`${API_BASE}/stats`, {
+            headers: window.Auth.getHeaders()
+        });
+        if (!resp.ok) throw new Error('Failed to load stats');
+        const data = await resp.json();
+
+        // Update top-level total stat if applicable
+        const statTotal = document.getElementById('stat-total');
+        if (statTotal) statTotal.textContent = data.cards.total_processed.toLocaleString();
+
+        const catLabels = data.distribution.map(d => d.label);
+        const catData   = data.distribution.map(d => d.value);
+        const catColors = ['#60a5fa', '#c084fc', '#34d399', '#fbbf24', '#f87171'];
+        const total = catData.reduce((a, b) => a + b, 0);
+
+        const isDark = () => document.documentElement.getAttribute('data-theme') === 'dark';
+
+        const ctx = canvas.getContext('2d');
+        new Chart(ctx, {
+            type: 'doughnut',
+            data: {
+                labels: catLabels,
+                datasets: [{ 
+                    data: catData, 
+                    backgroundColor: catColors, 
+                    borderColor: isDark() ? '#040714' : '#f1f5f9', 
+                    borderWidth: 3, 
+                    hoverOffset: 6 
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                cutout: '68%',
+                plugins: {
+                    legend: { display: false },
+                    tooltip: {
+                        backgroundColor: isDark() ? '#0c1230' : '#fff',
+                        callbacks: {
+                            label: c => ` ${c.label}: ${(c.parsed/total*100).toFixed(1)}%`
+                        }
+                    }
+                }
+            }
+        });
+
+        const legend = document.getElementById('dash-cat-legend');
+        if (legend) {
+            legend.innerHTML = '';
+            catLabels.forEach((lbl, i) => {
+                const pct = (catData[i] / total * 100).toFixed(1);
+                legend.innerHTML += `
+                    <div style="display:flex;align-items:center;gap:10px;">
+                        <span style="width:10px;height:10px;border-radius:50%;background:${catColors[i]};"></span>
+                        <span style="font-size:0.85rem;color:var(--text-secondary);flex:1;">${lbl}</span>
+                        <span style="font-size:0.85rem;font-weight:600;color:var(--text-primary);">${pct}%</span>
+                    </div>`;
+            });
+        }
+    } catch (err) {
+        console.error('Dash stats error:', err);
+    }
+}
+
+function timeAgo(date) {
+    const seconds = Math.floor((new Date() - new Date(date)) / 1000);
+    if (seconds < 60) return 'Just now';
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+    return new Date(date).toLocaleDateString();
+}
+
+async function loadAutomationTasks() {
+    const list = document.getElementById('dashboard-tasks-list');
+    if (!list) return;
+
+    try {
+        const resp = await fetch(`${API_BASE}/automations`, {
+            headers: window.Auth.getHeaders()
+        });
+        if (!resp.ok) throw new Error('Failed to load');
+
+        const automations = await resp.json();
+        if (automations.length === 0) {
+            list.innerHTML = `<div style="text-align:center;padding:32px;color:var(--text-muted);"><p style="font-size:0.85rem;">No active workflows. Click "Create New" to start.</p></div>`;
+            return;
+        }
+
+        list.innerHTML = automations.slice(0, 5).map(auto => `
+            <div class="task-card">
+                <div class="task-info">
+                    <h4>${escapeHtml(auto.name)}</h4>
+                    <p>${auto.send_time ? `Runs daily at ${auto.send_time}` : 'Bulk Broadcast'}</p>
+                </div>
+                <div class="progress-ring-wrap">
+                    <span class="badge ${auto.is_active ? 'badge-info' : ''}">${auto.is_active ? 'Active' : 'Paused'}</span>
+                </div>
+            </div>
+        `).join('');
+    } catch (err) {
+        console.error('Load tasks error:', err);
+        list.innerHTML = `<div style="text-align:center;padding:32px;color:var(--text-muted);"><p style="font-size:0.85rem;">Failed to load automations.</p></div>`;
+    }
+}
+
+// AI Compose Logic
+function openComposeModal() {
+    document.getElementById('compose-modal').style.display = 'flex';
+    document.body.style.overflow = 'hidden';
+}
+
+function closeComposeModal() {
+    document.getElementById('compose-modal').style.display = 'none';
+    document.body.style.overflow = '';
+}
+
+async function generateAiCompose() {
+    const prompt = document.getElementById('compose-prompt').value.trim();
+    if (!prompt) return alert('Please enter what the email should be about.');
+
+    const btn = document.getElementById('compose-generate-btn');
+    const resultArea = document.getElementById('compose-result-area');
+    
+    btn.disabled = true;
+    btn.textContent = 'AI is writing...';
+
+    try {
+        const resp = await fetch(`${API_BASE}/generate-compose`, {
+            method: 'POST',
+            headers: window.Auth.getHeaders(),
+            body: JSON.stringify({ prompt })
+        });
+
+        if (resp.ok) {
+            const data = await resp.json();
+            document.getElementById('compose-subject').value = data.subject;
+            document.getElementById('compose-body').value = data.body;
+            resultArea.style.display = 'flex';
+        } else {
+            alert('Failed to generate content. Please try a different prompt.');
+        }
+    } catch (err) {
+        alert('Server error. Please try again later.');
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"></path></svg> Generate with Groq AI`;
+    }
+}
+
+async function sendAiCompose() {
+    const to = document.getElementById('compose-to').value.trim();
+    const subject = document.getElementById('compose-subject').value.trim();
+    const body = document.getElementById('compose-body').value.trim();
+
+    if (!to || !subject || !body) return alert('All fields are required.');
+
+    const btn = document.getElementById('compose-send-btn');
+    btn.disabled = true;
+    btn.textContent = 'Sending...';
+
+    try {
+        const resp = await fetch(`${API_BASE}/gmail/send`, {
+            method: 'POST',
+            headers: window.Auth.getHeaders(),
+            body: JSON.stringify({ to, subject, body })
+        });
+
+        if (resp.ok) {
+            alert('Email sent successfully!');
+            closeComposeModal();
+        } else {
+            const err = await resp.json();
+            alert(`Failed: ${err.detail || 'Unknown error'}`);
+        }
+    } catch (err) {
+        alert('Failed to connect to server.');
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Send via Gmail';
+    }
+}
+
+// ══════════════════════════════════════════════════════
+//  NEW — Smart Reply 3-Tone Panel (OpenRouter / Nemotron)
+// ══════════════════════════════════════════════════════
+
+let smartReplyTones = null;   // { formal, friendly, brief }
+let selectedTone    = null;   // 'formal' | 'friendly' | 'brief'
+
+/**
+ * Called when user picks an email in the Smart Reply dropdown.
+ * Fires the /ai/smart-reply endpoint and renders 3 tone cards.
+ */
+async function onEmailSelectedSmartReply() {
+    const select  = document.getElementById('ai-email-select');
+    const emailId = select.value;
+
+    const idleState     = document.getElementById('ai-idle-state');
+    const replySection  = document.getElementById('smart-reply-section');
+    const selectedReply = document.getElementById('selected-reply-section');
+
+    if (!emailId) {
+        idleState.style.display    = 'block';
+        replySection.style.display = 'none';
+        selectedAiEmail  = null;
+        smartReplyTones  = null;
+        selectedTone     = null;
+        return;
+    }
+
+    selectedAiEmail = allGmailEmails.find(e => e.id === emailId);
+    if (!selectedAiEmail) return;
+
+    // Show panel + loading skeletons
+    idleState.style.display     = 'none';
+    replySection.style.display  = 'block';
+    selectedReply.style.display = 'none';
+
+    const container = document.getElementById('tone-cards-container');
+    container.innerHTML = `
+        <div id="tone-loading" style="padding:12px 0;">
+            <div class="tone-skeleton" style="width:40%;margin-bottom:16px;"></div>
+            <div class="tone-skeleton" style="width:90%;"></div>
+            <div class="tone-skeleton" style="width:70%;"></div>
+            <div class="tone-skeleton" style="width:80%;margin-top:12px;"></div>
+            <div class="tone-skeleton" style="width:60%;"></div>
+        </div>`;
+
+    smartReplyTones = null;
+    selectedTone    = null;
+
+    addDecisionLog(`Generating 3-tone replies for "${(selectedAiEmail.subject || '').substring(0, 30)}..."`);
+
+    try {
+        const senderMatch = selectedAiEmail.from.match(/^(.+?)\s*</) || [, selectedAiEmail.from];
+        const senderName  = senderMatch[1].replace(/"/g, '').trim();
+        const emailBody   = selectedAiEmail.body || selectedAiEmail.snippet || '';
+
+        const resp = await fetch(`${API_BASE}/ai/smart-reply`, {
+            method:  'POST',
+            headers: window.Auth.getHeaders(),
+            body:    JSON.stringify({
+                emailText:  `Subject: ${selectedAiEmail.subject}\nFrom: ${selectedAiEmail.from}\n\n${emailBody}`,
+                senderName: senderName,
+            }),
+        });
+
+        if (!resp.ok) {
+            const err = await resp.json();
+            throw new Error(err.detail || 'Smart reply failed');
+        }
+
+        const data = await resp.json();
+        smartReplyTones = data.replies;
+        renderToneCards(smartReplyTones, senderName);
+        addDecisionLog(`✨ 3 tone variants ready for ${senderName}`);
+        if (window.Toast) Toast.success('3 reply tones generated!', 'Smart Reply');
+
+    } catch (err) {
+        container.innerHTML = `<div style="padding:16px;text-align:center;color:var(--text-muted);font-size:0.85rem;">
+            ❌ ${escapeHtml(err.message)}<br/>
+            <button class="btn btn-outline small" style="margin-top:12px;" onclick="onEmailSelectedSmartReply()">Retry</button>
+        </div>`;
+        console.error('[SmartReply]', err);
+        if (window.Toast) Toast.error(err.message, 'Smart Reply Failed');
+    }
+}
+
+function renderToneCards(tones, senderName) {
+    const container = document.getElementById('tone-cards-container');
+    const configs = [
+        { key: 'formal',   icon: '📋', label: 'Formal',   cls: 'tone-formal'   },
+        { key: 'friendly', icon: '😊', label: 'Friendly', cls: 'tone-friendly' },
+        { key: 'brief',    icon: '⚡', label: 'Brief',    cls: 'tone-brief'    },
+    ];
+
+    container.innerHTML = configs.map(({ key, icon, label, cls }) => `
+        <div class="tone-card ${cls}" id="tone-card-${key}" onclick="selectTone('${key}')">
+            <div class="tone-header">
+                <span class="tone-icon">${icon}</span>
+                <span class="tone-label">${label}</span>
+            </div>
+            <p class="tone-text">${escapeHtml((tones[key] || '').substring(0, 160))}${(tones[key] || '').length > 160 ? '…' : ''}</p>
+        </div>
+    `).join('');
+}
+
+function selectTone(tone) {
+    if (!smartReplyTones || !smartReplyTones[tone]) return;
+    selectedTone = tone;
+
+    // Update card selection state
+    ['formal', 'friendly', 'brief'].forEach(t => {
+        const card = document.getElementById(`tone-card-${t}`);
+        if (card) card.classList.toggle('selected', t === tone);
+    });
+
+    // Populate textarea and show editor
+    const textarea = document.getElementById('ai-reply-text');
+    if (textarea) textarea.value = smartReplyTones[tone];
+
+    const selectedReply = document.getElementById('selected-reply-section');
+    if (selectedReply) selectedReply.style.display = 'block';
+
+    addDecisionLog(`Selected ${tone} tone reply`);
+}
+
+
+// ══════════════════════════════════════════════════════
+//  NEW — Briefing Banner (Today's Stats)
+// ══════════════════════════════════════════════════════
+
+function updateBriefingBanner(stats) {
+    const set = (id, val) => {
+        const el = document.getElementById(id);
+        if (el) el.textContent = val ?? '—';
+    };
+
+    set('brief-total',       stats?.total_today       ?? '—');
+    set('brief-ai-actions',  stats?.ai_actions_today  ?? '—');
+    set('brief-automations', stats?.automations_today ?? '—');
+    set('brief-time-saved',  stats?.time_saved_mins   ?? '—');
+}
+
+// ══════════════════════════════════════════════════════
+//  NEW — Snooze Email
+// ══════════════════════════════════════════════════════
+
+function snoozeEmail(emailId, minutes = 60) {
+    const snoozed = JSON.parse(localStorage.getItem('inbex-snoozed') || '[]');
+    const email   = allGmailEmails.find(e => e.id === emailId);
+    if (!email) return;
+
+    const snoozeUntil = Date.now() + minutes * 60 * 1000;
+    snoozed.push({ id: emailId, subject: email.subject, snoozeUntil });
+    localStorage.setItem('inbex-snoozed', JSON.stringify(snoozed));
+
+    if (window.Toast) Toast.success(`Snoozed for ${minutes} mins`, 'Email Snoozed ⏰');
+    addDecisionLog(`⏰ Snoozed "${(email.subject || '').substring(0, 30)}" for ${minutes} min`);
+}
+
+function checkSnoozedEmails() {
+    const snoozed = JSON.parse(localStorage.getItem('inbex-snoozed') || '[]');
+    const now = Date.now();
+    const due = snoozed.filter(s => now >= s.snoozeUntil);
+    const remaining = snoozed.filter(s => now < s.snoozeUntil);
+
+    due.forEach(s => {
+        if (window.Toast) Toast.warn(`Time to revisit: "${s.subject}"`, 'Snoozed Email ⏰', 8000);
+    });
+
+    if (due.length > 0) localStorage.setItem('inbex-snoozed', JSON.stringify(remaining));
+}
+
+// Check snoozed emails on load and every 5 minutes
+document.addEventListener('DOMContentLoaded', () => {
+    checkSnoozedEmails();
+    setInterval(checkSnoozedEmails, 5 * 60 * 1000);
+});
+
+// ══════════════════════════════════════════════════════
+//  UPDATED — AI Compose (now uses /ai/compose)
+// ══════════════════════════════════════════════════════
+
+async function generateAiCompose() {
+    const prompt       = document.getElementById('compose-prompt').value.trim();
+    const recipientTo  = document.getElementById('compose-to').value.trim();
+    if (!prompt) {
+        if (window.Toast) Toast.warn('Please describe what the email should be about.', 'Prompt Required');
+        return;
+    }
+
+    const btn        = document.getElementById('compose-generate-btn');
+    const resultArea = document.getElementById('compose-result-area');
+
+    btn.disabled = true;
+    btn.innerHTML = `<span style="display:inline-block;width:14px;height:14px;border:2px solid rgba(255,255,255,0.3);border-top-color:white;border-radius:50%;animation:spin 0.8s linear infinite;"></span> Generating...`;
+
+    try {
+        const resp = await fetch(`${API_BASE}/ai/compose`, {
+            method:  'POST',
+            headers: window.Auth.getHeaders(),
+            body:    JSON.stringify({
+                prompt,
+                recipientEmail: recipientTo,
+            }),
+        });
+
+        if (resp.ok) {
+            const data = await resp.json();
+            document.getElementById('compose-subject').value = data.subject || '';
+            document.getElementById('compose-body').value    = data.body    || '';
+            resultArea.style.display = 'flex';
+            if (window.Toast) Toast.success('Email drafted successfully!', 'AI Compose');
+        } else {
+            const err = await resp.json();
+            if (window.Toast) Toast.error(err.detail || 'Failed to generate email', 'Compose Failed');
+        }
+    } catch (err) {
+        if (window.Toast) Toast.error('Cannot connect to server. Is the backend running?', 'Server Error');
+        console.error('[Compose]', err);
+    }
+
+    btn.disabled = false;
+    btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"></path></svg> Generate with AI`;
+}
+
+async function sendAiCompose() {
+    const to      = document.getElementById('compose-to').value.trim();
+    const subject = document.getElementById('compose-subject').value.trim();
+    const body    = document.getElementById('compose-body').value.trim();
+
+    if (!to || !subject || !body) {
+        if (window.Toast) Toast.warn('All fields are required before sending.', 'Missing Fields');
+        return;
+    }
+
+    const btn = document.getElementById('compose-send-btn');
+    btn.disabled = true;
+    btn.textContent = 'Sending...';
+
+    try {
+        const resp = await fetch(`${API_BASE}/gmail/send`, {
+            method:  'POST',
+            headers: window.Auth.getHeaders(),
+            body:    JSON.stringify({ to, subject, body }),
+        });
+
+        if (resp.ok) {
+            if (window.Toast) Toast.success(`Email sent to ${to}!`, 'Sent ✅');
+            addDecisionLog(`📨 Compose email sent to ${to}`);
+            closeComposeModal();
+        } else {
+            const err = await resp.json();
+            if (window.Toast) Toast.error(err.detail || 'Failed to send email', 'Send Failed');
+        }
+    } catch (err) {
+        if (window.Toast) Toast.error('Cannot connect to server.', 'Server Error');
+    }
+
+    btn.disabled = false;
+    btn.textContent = 'Send via Gmail';
+}
+
+// ══════════════════════════════════════════════════════
+//  UPDATED — Welcome name uses id="welcome-name"
+// ══════════════════════════════════════════════════════
+
+function loadUserProfile() {
+    const user = window.Auth ? window.Auth.getUser() : null;
+    if (!user) return;
+
+    const name  = user.name || user.username || user.email || 'User';
+    const first = name.split(' ')[0];
+
+    const avatar = document.getElementById('user-avatar');
+    if (avatar) {
+        avatar.src = `https://ui-avatars.com/api/?name=${encodeURIComponent(name)}&background=6366f1&color=fff&rounded=true`;
+        avatar.alt = name;
+    }
+
+    const welcomeEl = document.getElementById('welcome-name');
+    if (welcomeEl) welcomeEl.textContent = `Welcome back, ${first} 👋`;
+
+    const dropName  = document.getElementById('dropdown-name');
+    const dropEmail = document.getElementById('dropdown-email');
+    if (dropName)  dropName.textContent  = name;
+    if (dropEmail) dropEmail.textContent = user.email || '';
+}
+
+// ══════════════════════════════════════════════════════
+//  Expose all functions globally
+// ══════════════════════════════════════════════════════
+window.openComposeModal       = openComposeModal;
+window.closeComposeModal      = closeComposeModal;
+window.loadActivity           = loadActivity;
+window.loadAutomationTasks    = loadAutomationTasks;
+window.generateAiCompose      = generateAiCompose;
+window.sendAiCompose          = sendAiCompose;
+window.connectGmail           = connectGmail;
+window.disconnectGmail        = disconnectGmail;
+window.openClassifyWithEmail  = openClassifyWithEmail;
+window.openEmailModal         = openEmailModal;
+window.closeEmailModal        = closeEmailModal;
+window.replyFromModal         = replyFromModal;
+window.onEmailSelected        = onEmailSelected;
+window.onEmailSelectedSmartReply = onEmailSelectedSmartReply;
+window.selectTone             = selectTone;
+window.generateAiReply        = generateAiReply;
+window.sendAiReply            = sendAiReply;
+
+window.snoozeEmail            = snoozeEmail;
+window.filterUrgentEmails     = filterUrgentEmails;
+window.nextEmailPage          = nextEmailPage;
+window.prevEmailPage          = prevEmailPage;
+window.toggleProfileMenu      = toggleProfileMenu;
+window.signOutFromDashboard   = signOutFromDashboard;
+window.loadUserProfile        = loadUserProfile;
+window.updateBriefingBanner   = updateBriefingBanner;
